@@ -1,0 +1,274 @@
+---
+title: "LPSspleen_DCsubset_GSEA analysis"
+date: "2024-11-15"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(pheatmap)
+library(clusterProfiler)
+library(enrichplot)
+library(BioNet)
+library(stringr)
+library(pcaMethods)
+library(DESeq2)
+library(ggpubr)
+library(org.Mm.eg.db)
+library(tibble)
+```
+
+### GO:BP
+
+```{r GSEA enrichment using GO:BP, echo = TRUE}
+library(clusterProfiler) 
+library(org.Mm.eg.db)    
+library(dplyr)           
+
+# Read and preprocess each group
+groups <- list(
+  norm_lpsin = read.csv("/Users/Suzy/Documents/SP_data_processing/LPS/Norm_vs_LPSin.csv"),    
+  norm_lpsout = read.csv("/Users/Suzy/Documents/SP_data_processing/LPS/Norm_vs_LPSout.csv"),  
+  lpsin_lpsout = read.csv("/Users/Suzy/Documents/SP_data_processing/LPS/LPSin_vs_LPSout.csv") 
+)
+
+# Initialize list to store results
+gsea_results <- list()
+
+# Process each group
+for (group_name in names(groups)) {
+  # Extract group data
+  group_data <- groups[[group_name]]
+  
+  # Extract log fold-change values and gene names
+  ranks <- group_data$logFC
+  names(ranks) <- group_data$Genes
+  
+  # Convert Gene Symbols to ENTREZ IDs
+  gene_conversion <- bitr(
+    names(ranks),
+    fromType = "SYMBOL",
+    toType = "ENTREZID",
+    OrgDb = org.Mm.eg.db
+  )
+  
+  # Filter and match ranks with converted IDs
+  gene_scores_entrez <- ranks[gene_conversion$SYMBOL]
+  names(gene_scores_entrez) <- gene_conversion$ENTREZID
+  
+  # Remove NA values to avoid errors during plotting or GSEA
+  gene_scores_entrez <- na.omit(gene_scores_entrez)
+  
+  # Barplot of gene scores
+  barplot(
+    sort(gene_scores_entrez, decreasing = TRUE),
+    main = paste("Gene Scores (ENTREZ IDs) for", group_name),
+    xlab = "Genes (ENTREZ IDs)",
+    ylab = "Log Fold Change",
+    las = 2,  # Rotate axis labels
+    col = "blue"
+  )
+  
+ # Perform GSEA using KEGG
+geneList <- sort(gene_scores_entrez, decreasing = TRUE)
+
+# Perform GSEA using GO Biological Process (BP)
+gsea_result <- gseGO(
+  geneList = geneList,             # Ranked list of genes
+  OrgDb = org.Mm.eg.db,            # Mouse organism database
+  ont = "BP",                      # Ontology: Biological Process
+  minGSSize = 3,                   # Minimum size of gene sets
+  maxGSSize = 800,                 # Maximum size of gene sets
+  pvalueCutoff = 0.05,             # p-value cutoff
+  pAdjustMethod = "BH",            # Benjamini-Hochberg correction
+  keyType = "ENTREZID"             # ID type (ENTREZ IDs)
+)
+  # Store GSEA results for the group
+  gsea_results[[group_name]] <- gsea_result
+  
+  # Print summary of GSEA results for this group
+  print(paste("GSEA results for", group_name))
+  print(head(gsea_result))
+}
+ 
+```
+
+```{r plot bubble plot, echo=TRUE}
+# Load required libraries
+library(ggplot2)
+
+# Iterate through each group's GSEA results
+for (group_name in names(gsea_results)) {
+  # Convert GSEA result to a data frame
+  gsea_results_df <- as.data.frame(gsea_results[[group_name]])
+  
+  # Remove "Mus musculus (house mouse)" from the description
+  gsea_results_df$Description <- gsub("- .*", "", gsea_results_df$Description)
+  
+  # Filter results to include only significant pathways (adjust as needed)
+  gsea_results_df_filtered <- gsea_results_df[gsea_results_df$p.adjust < 0.05, ]
+  
+  # Save filtered GSEA results as a .csv file
+  # Save to the download folder
+  if (nrow(gsea_results_df_filtered) > 0) {
+    write.csv(
+      gsea_results_df_filtered,
+      file = paste0("GSEA_Results_", group_name, ".csv"),
+      row.names = FALSE
+    )
+  } else {
+    message(paste("No significant pathways to save for group:", group_name))
+  }
+  
+  # Select the top 25 pathways by adjusted p-value
+  gsea_results_df_top25 <- gsea_results_df_filtered[order(gsea_results_df_filtered$p.adjust), ][1:25, ]
+  
+  # Check if there are enough pathways to plot
+  if (nrow(gsea_results_df_top25) > 0) {
+    # Create a bubble plot
+    bubble_plot <- ggplot(gsea_results_df_top25, aes(x = NES, 
+                                                     y = reorder(Description, NES), 
+                                                     size = setSize, 
+                                                     color = p.adjust)) +
+      geom_point(alpha = 0.8) +
+      scale_color_gradient(low = "red", high = "blue", name = "Adjusted P-Value") +
+      labs(title = paste("Enriched GO Pathways -", group_name),
+           x = "Normalized Enrichment Score (NES)",
+           y = "Pathway Description",
+           size = "gene size") +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 10, face = "bold"),
+            axis.text.x = element_text(size = 10, hjust = 1)) 
+    
+        # Save the plot to a PDF file
+        # It is saved to the download folder 
+    ggsave(filename = paste0("Enriched_GO_Pathways_", group_name, ".pdf"),
+           plot = bubble_plot,
+           width = 10, height = 8, device = "pdf")
+    
+    # Display the plot
+    print(bubble_plot)
+  } else {
+    message(paste("No significant pathways for group:", group_name))
+  }
+}
+```
+
+```{r plot bubble plot specified pathway norm_lpsin, echo=TRUE}
+# Load required libraries
+library(ggplot2)
+
+# Specify the group name to process
+group_name <- "norm_lpsin"
+
+# Convert GSEA result to a data frame
+gsea_results_df <- as.data.frame(gsea_results[[group_name]])
+  
+# Remove "Mus musculus (house mouse)" from the description
+gsea_results_df$Description <- gsub("- .*", "", gsea_results_df$Description)
+  
+# Filter results to include only significant pathways (adjust as needed)
+gsea_results_df_filtered <- gsea_results_df[gsea_results_df$p.adjust < 0.05, ]
+  
+# List of specified pathways
+specified_pathways <- c("cellular response to cytokine stimulus", "defense response", "intermediate filament-based process", "intermediate filament cytoskeleton organization", "response to interferon-alpha", "response to bacterium", "immune response", "defense response to bacterium", "cytosolic pattern recognition receptor signaling pathway", "intracellular receptor signaling pathway", "regulation of response to biotic stimulus", "positive regulation of innate immune response", "regulation of innate immune response", "cytokine-mediated signaling pathway", "response to type II interferon", "response to lipopolysaccharide", "cytoskeleton organization", "supramolecular fiber organization")
+  
+# Filter the data frame for the specified pathways
+gsea_results_df_specified <- gsea_results_df_filtered %>% dplyr::filter(Description %in% specified_pathways)
+  
+  # Check if there are enough pathways to plot
+  if (nrow(gsea_results_df_specified) > 0) {
+    # Create a bubble plot
+    bubble_plot <- ggplot(gsea_results_df_specified, aes(x = NES, 
+                                                     y = reorder(Description, NES), 
+                                                     size = setSize, 
+                                                     color = p.adjust)) +
+      geom_point(alpha = 0.8) +
+      scale_color_gradient(low = "red", high = "blue", name = "Adjusted P-Value") +
+      labs(title = paste("Inside vs. Norm"),
+           x = "Normalized Enrichment Score (NES)",
+           y = "Pathway Description",
+           size = "gene size") +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 12),
+            axis.text.x = element_text(size = 12, hjust = 1),
+            axis.title = element_text(size=14))
+    
+        # Save the plot to a PDF file
+        # It is saved to the download folder 
+    #ggsave(filename = paste0("Enriched_GO_Pathways_", group_name, ".pdf"),
+           #plot = bubble_plot,
+           #width = 10, height = 8, device = "pdf")
+    
+    # Display the plot
+    print(bubble_plot)
+  } else {
+    message(paste("No significant pathways for group:", group_name))
+  }
+
+```
+
+```{r plot bubble plot specified pathway norm_lpsout, echo=TRUE}
+# Load required libraries
+library(ggplot2)
+
+# Specify the group name to process
+group_name <- "norm_lpsout"
+
+# Convert GSEA result to a data frame
+gsea_results_df <- as.data.frame(gsea_results[[group_name]])
+  
+# Remove "Mus musculus (house mouse)" from the description
+gsea_results_df$Description <- gsub("- .*", "", gsea_results_df$Description)
+  
+# Filter results to include only significant pathways (adjust as needed)
+gsea_results_df_filtered <- gsea_results_df[gsea_results_df$p.adjust < 0.05, ]
+  
+# List of specified pathways
+specified_pathways <- c("cellular response to interferon-beta","defense response to bacterium","immune response", "response to cytokine","response to lipopolysaccharide","response to molecule of bacterial origin","intracellular receptor signaling pathway","cellular response to cytokine stimulus","organelle localization","positive regulation of response to external stimulus","regulation of inflammasome-mediated signaling pathway","activation of innate immune response","leukocyte migration involved in inflammatory response","cytosolic pattern recognition receptor signaling pathway","canonical inflammasome complex assembly","defense response to Gram-negative bacterium","antimicrobial humoral response","cellular response to type II interferon","establishment of organelle localization")
+  
+# Filter the data frame for the specified pathways
+gsea_results_df_specified <- gsea_results_df_filtered %>% dplyr::filter(Description %in% specified_pathways)
+  
+  # Check if there are enough pathways to plot
+  if (nrow(gsea_results_df_specified) > 0) {
+    # Create a bubble plot
+    bubble_plot <- ggplot(gsea_results_df_specified, aes(x = NES, 
+                                                     y = reorder(Description, NES), 
+                                                     size = setSize, 
+                                                     color = p.adjust)) +
+      geom_point(alpha = 0.8) +
+      scale_color_gradient(low = "red", high = "blue", name = "Adjusted P-Value") +
+      labs(title = paste("Outside vs. Norm"),
+           x = "Normalized Enrichment Score (NES)",
+           y = "Pathway Description",
+           size = "gene size") +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 12),
+            axis.text.x = element_text(size = 12, hjust = 1),
+            axis.title = element_text(size=14))
+    
+        # Save the plot to a PDF file
+        # It is saved to the download folder 
+    #ggsave(filename = paste0("Enriched_GO_Pathways_", group_name, ".pdf"),
+           #plot = bubble_plot,
+           #width = 10, height = 8, device = "pdf")
+    
+    # Display the plot
+    print(bubble_plot)
+  } else {
+    message(paste("No significant pathways for group:", group_name))
+  }
+
+```
+
+
+
+
+

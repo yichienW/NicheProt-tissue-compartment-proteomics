@@ -1,0 +1,360 @@
+---
+title: "LPSspleen_DCsubset"
+date: "2024-09-24"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+# Load necessary library
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(pheatmap)
+library(clusterProfiler)
+library(enrichplot)
+library(BioNet)
+library(stringr)
+library(pcaMethods)
+library(DESeq2)
+library(ggpubr)
+library(org.Mm.eg.db)
+library(tibble)
+
+```
+
+```{r read in intensity values from n3 sheet, echo = TRUE}
+
+intensity_raw <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/LPS/CE3_UIC_P24035_12TCZ3_AS1-9_Proteins.xlsx", sheet = 1) %>%
+  dplyr::select(4,20:28)
+
+colnames(intensity_raw) <- c("Proteins","Norm_1","Outside_1","Inside_1","Norm_2","Outside_2","Inside_2","Norm_3","Outside_3","Inside_3")
+
+
+```
+
+```{r gene mapping using uniprot file, echo = TRUE}
+
+uniprot_ids <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/LPS/uniprotkb_AND_model_organism_10090_AND_2024_10_07.xlsx")%>%
+  dplyr::select(Entry, `Gene Names`)%>%
+  dplyr::rename("Proteins"="Entry")
+
+intensity_raw_map <- intensity_raw %>%
+  left_join(.,uniprot_ids, by = "Proteins")%>%
+  mutate(`Gene Names` = gsub(" .*","",`Gene Names`))%>%
+  dplyr::select(Proteins,`Gene Names`,2:10)%>%
+  dplyr::rename("Genes"="Gene Names")
+
+intensity_raw_map$Genes <- make.unique(intensity_raw_map$Genes)
+  
+intensity_raw <- intensity_raw_map
+```
+
+```{r data normalization, echo = TRUE}
+library(dplyr)
+library(tibble)
+library(vsn)
+library(limma)
+
+# Ensure all gene names in the 'Genes' column are unique
+# Ensure all selected columns are numeric
+numeric_cols <- intensity_raw %>%
+  dplyr::select(-c(Proteins))%>%
+  mutate(Genes = ifelse(is.na(Genes) | Genes == "", "NA", Genes))%>%  # ifelse(condition1|condition2, value_if_true, value_if_false)
+  column_to_rownames(var = "Genes") %>%  # Set 'Genes' as row names
+  mutate(across(starts_with("Norm_") | starts_with("Outside_") | starts_with("Inside_"), as.numeric))
+
+# Check if numeric conversion was successful
+str(numeric_cols)
+
+# Assuming `numeric_data` is your data matrix
+vsn_data <- normalizeVSN(as.matrix(numeric_cols))
+
+# Verify fit using meanSdPlot
+meanSdPlot(vsn_data)
+
+# Convert to a data frame for ggplot2
+normalized_df <- as.data.frame(vsn_data)
+```
+
+
+```{r data imputation, echo = TRUE}
+# Impute missing values from a normal distribution
+impute_normal <- function(x) {
+  missing <- is.na(x)
+  n_missing <- sum(missing)
+  if (n_missing > 0) {
+    imputed_values <- rnorm(n_missing, mean(x, na.rm = TRUE) - 1.8 * sd(x, na.rm = TRUE), 0.3 * sd(x, na.rm = TRUE))
+    x[missing] <- imputed_values
+  }
+  return(x)
+}
+
+# Impute zero values
+intensity_imputed <- normalized_df %>%
+  mutate(across(starts_with("Norm") | starts_with("Outside") | starts_with("Inside"), impute_normal))
+
+```
+
+PCA plots
+```{r pca, echo=TRUE}
+# Perform PCA
+# Remove Protein_ID column for PCA
+
+library(ggrepel)
+pca_data <- intensity_imputed 
+
+# Perform PCA
+# Perform PCA on the log-transformed data
+pca_results <- pca(t(pca_data), method = "svd")
+
+# Extract PCA scores
+pca_scores <- as.data.frame(scores(pca_results))
+pca_scores$Sample <- rownames(pca_scores)
+
+#Prepare pheno_dat
+pheno_dat <- as.data.frame(rownames(pca_scores)) %>%
+  dplyr::rename("Sample" = "rownames(pca_scores)") %>%
+  mutate(Group = case_when(
+    grepl("Norm", Sample) ~ "Norm",
+    grepl("Inside", Sample) ~ "Inside",
+    grepl("Outside", Sample) ~ "Outside",
+    TRUE ~ "Unknown"
+  )) %>%
+  left_join(pca_scores, by = "Sample") %>%
+  mutate(batch =ifelse(Sample %in% c("Norm_1","Outside_1","Inside_1"),"batch_1",""))%>%
+  mutate(batch =ifelse(Sample %in% c("Norm_2","Outside_2","Inside_2"),"batch_2",batch))%>%
+  mutate(batch =ifelse(Sample %in% c("Norm_3","Outside_3","Inside_3"),"batch_3",batch))
+
+# Plot PCA results
+pca_sample <- ggplot(pheno_dat, aes(x = PC1, y = PC2, color = Sample)) +
+  geom_point() +
+  labs(title = "PCA by sample", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_sample
+
+pca_group <- ggplot(pheno_dat, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point() +
+  labs(title = "PCA by group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_group
+
+pca_group <- ggplot(pheno_dat, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 3) +
+  # ADD ggforce's ellipses
+  #ggforce::geom_mark_ellipse(aes(color = batch))+
+  labs(title = "PCA by group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_group
+
+ggarrange(pca_sample, pca_group, nrow = 1)
+
+pca_sample <- ggplot(pheno_dat, aes(x = PC1, y = PC2, color = Group, shape = batch)) +
+  geom_point(size = 3) +
+  labs(title = "PCA by batch and group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_sample
+
+
+```
+
+## Batch correction and PCA 
+```{r batch correction, echo = TRUE}
+library(sva)
+library(ggrepel)
+
+# Convert normalized_df to a numeric matrix if it's not already
+normalized_matrix <- as.matrix(intensity_imputed)
+
+# Ensure that batch is a factor in pheno_dat
+pheno_dat$batch <- as.factor(pheno_dat$batch)
+pheno_dat$Group <- as.factor(pheno_dat$Group)
+
+# Apply ComBat to correct for batch effects
+# ComBat requires a design matrix; if no other covariates are present, use just an intercept
+# Create a design matrix
+mod <- model.matrix(~ Group, data = pheno_dat)
+
+# Apply ComBat for batch correction
+batch_corrected <- ComBat(dat = normalized_matrix,
+                           batch = pheno_dat$batch, 
+                           mod = mod,              # Use the design matrix
+                           par.prior = TRUE, 
+                           prior.plots = FALSE)    # Set to TRUE if you want to see prior plots
+
+batch_corrected <- as.data.frame(batch_corrected)
+
+# Perform PCA
+pca_result <- pca(t(batch_corrected), method = "svd")
+
+# Extract PCA scores
+pca_batch_correct <- as.data.frame(scores(pca_result))
+pca_batch_correct$Sample <- rownames(pca_batch_correct)
+
+
+pheno_dat <- pheno_dat %>%
+  left_join(pca_batch_correct, by = "Sample") 
+
+
+
+pca_batch <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = batch)) +
+  geom_point(size = 3) +
+  # ADD ggforce's ellipses
+  #ggforce::geom_mark_ellipse(aes(color = batch))+
+  labs(title = "PCA by batch", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_batch
+
+
+
+pca_group <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = Group)) +
+  geom_point(size = 3) +
+  # ADD ggforce's ellipses
+  #ggforce::geom_mark_ellipse(aes(color = batch))+
+  labs(title = "PCA by group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_group
+
+
+pca_sample <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = Sample, shape = Group)) +
+  geom_point(size = 3) +
+  labs(title = "PCA by sample and treatment", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_sample
+
+pca_sample <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = Group, shape = batch)) +
+  geom_point(size = 3) +
+  labs(title = "PCA by batch and group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_sample
+
+pca_sample <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = Group)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Sample), size = 4, max.overlaps = Inf) +
+  labs(title = "PCA by batch and group", x = "PC1", y = "PC2") +
+  theme_bw()+
+  theme(
+    axis.title.x =element_text(family= "Arial", size=16),
+    axis.title.y =element_text(family= "Arial", size=16),
+    axis.text = element_text(family= "Arial", size = 14)
+  )
+
+pca_sample
+
+```
+
+```{r intensity heatmap for top variance proteins, echo = TRUE}
+intensity_heatmap <- batch_corrected %>%
+  as.data.frame()%>%
+  dplyr::select(starts_with("Norm_") | starts_with("Outside_") | starts_with("Inside_"))
+
+# Create heatmap
+# Select top proteins based on variance for visualization
+top_proteins <- apply(intensity_heatmap, 1, var) %>%
+  sort(decreasing = TRUE) %>%
+  head(50) %>%
+  names()
+
+heatmap_data <- intensity_heatmap[top_proteins, ]
+heatmap_matrix <- as.matrix(heatmap_data)
+
+# Load necessary library
+library(pheatmap)
+
+# Customizing the heatmap
+heatmap50 <- pheatmap(heatmap_matrix, 
+         scale = "row",                     # Scale each row (protein)
+         cluster_rows = TRUE,               # Cluster rows
+         cluster_cols = FALSE,              # Do not cluster columns
+         color = colorRampPalette(c("blue", "white", "red"))(10),  # Custom color palette
+         main = "Heatmap top 50 proteins",  # Title of the heatmap
+         fontsize = 12,                     # Font size for the heatmap
+         fontsize_row = 10,                  # Font size for row names
+         fontsize_col = 12,                 # Font size for column names
+         border_color = "black",                 # No border color around cells
+         cellwidth = 30,                    # Width of the cells
+         cellheight = 10,                   # Height of the cells
+         legend = TRUE,                     # Show legend
+         legend_breaks = c(-2, -1, 0, 1, 2),# Custom breaks for legend, adjust based on your data
+         legend_labels = c("-2", "-1", "0", "1", "2"),  # Intensity values as legend labels
+         treeheight_row = 50,               # Height of the row dendrogram
+         treeheight_col = 0,                # No column dendrogram
+         show_rownames = TRUE,              # Show row names (proteins)
+         show_colnames = TRUE               # Show column names (samples)
+         )
+
+heatmap50
+```
+
+
+```{r perform differential expression analysis, echo = TRUE}
+
+library(limma)
+library(edgeR)
+library(ggrepel)
+
+# Define group information
+Group <- factor(pheno_dat$Group)
+
+# Create a design matrix
+design <- model.matrix(~0 + Group)
+colnames(design) <- levels(Group)
+
+# Define contrasts
+contrasts <- makeContrasts(
+  Norm_vs_in = Inside - Norm,
+  Norm_vs_out = Outside - Norm,
+  in_vs_out = Inside - Outside,
+  levels = design
+)
+
+# Fit linear model
+fit <- lmFit(batch_corrected, design)
+fit2 <- contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+
+# Extract results for each contrast
+results_Norm_vs_in <- topTable(fit2, coef = "Norm_vs_in", adjust = "BH", number = Inf) %>%
+  rownames_to_column(var = "Genes")
+results_Norm_vs_out <- topTable(fit2, coef = "Norm_vs_out", adjust = "BH", number = Inf)%>%
+  rownames_to_column(var = "Genes")
+results_in_vs_out <- topTable(fit2, coef = "in_vs_out", adjust = "BH", number = Inf)%>%
+  rownames_to_column(var = "Genes")
+
+## plot volcano plot 
+# use max.overlaps = Inf will show all the differentially-expressed gene names 
+plot_volcano <- function(results, contrast_name) {
+  results$Significance <- ifelse(results$adj.P.Val < 0.05 & results$logFC > 1, "Upregulated",
+                          ifelse(results$adj.P.Val < 0.05 & results$logFC < - 1, "Downregulated", "Not Significant"))
+
+  ggplot(results, aes(x = logFC, y = -log10(P.Value))) +
+    geom_point(aes(color = Significance), alpha = 0.5) +
+    scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Not Significant" = "gray")) +
+    geom_text_repel(aes(label = ifelse(Significance != "Not Significant", Genes, "")),
+                    size = 3, max.overlaps = 15) +
+    labs(title = paste("Volcano Plot:", contrast_name),
+         x = "Log2 Fold Change",
+         y = "-Log10 P-Value") +
+    theme_minimal()
+}
+
+
+# Plot volcano plots for each contrast
+plot_volcano(results_Norm_vs_in, "inside vs Normal")
+plot_volcano(results_Norm_vs_out, "outside vs Normal")
+plot_volcano(results_in_vs_out, "inside vs outside")
+
+
+```
