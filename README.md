@@ -31,3 +31,14 @@ This repository contains R scripts used to:
 - assess whether tissue cryopreservation introduces detectable protein artifacts, 
 - evaluate the NicheProt workflow for potential protein artifacts, and
 - analyze two compartment-specific dendritic cell populations in a lipopolysaccharide (LPS)-induced inflammation mouse spleen model.
+
+
+--------------------
+SCRIPT OVERVIEW
+--------------------
+
+| Analysis | Script | Description |
+|----------|--------|-------------|
+| Cryopreservation artifact assessment | `Validation1.Rmd` | Evaluates whether cryopreservation introduces detectable protein artifacts |
+| NicheProt workflow artifact validation | `Validation2.Rmd` | Assesses potential protein artifacts introduced by the NicheProt workflow |
+| Dendritic cell analysis | `LPSspleen_DCsubsets.Rmd` `LPSspleen_DCsubsets_GSEAanalysis.Rmd`| Identifies compartment-specific dendritic cell populations and differential protein expression |
