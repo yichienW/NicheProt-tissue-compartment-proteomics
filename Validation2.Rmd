@@ -1,0 +1,296 @@
+---
+title: "Validation 2 NicheProt workflow"
+date: "2025-04-17"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Load necessary library
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(pheatmap)
+library(clusterProfiler)
+library(enrichplot)
+library(BioNet)
+library(stringr)
+library(pcaMethods)
+library(DESeq2)
+library(ggpubr)
+library(org.Mm.eg.db)
+library(VIM)
+library(AnnotationDbi)
+library(ggrepel)
+```
+
+```{r read in intensity values from n3 sheet, echo = TRUE}
+
+intensity_raw <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/new_valid2/CE3_2024Oct08_05_P24-162_ES1-ES6_Proteins.xlsx", sheet = 1) %>%
+  filter(`Protein FDR Confidence: Combined` != "Checked")%>%
+  dplyr::select(4:5, 27:32)
+
+colnames(intensity_raw) <- c("Proteins","Description","Control_1","Control_2","Control_3","NicheProt_1","NicheProt_2","NicheProt_3")
+
+# Remove rows where all values are NA
+intensity_raw <- intensity_raw %>%
+  dplyr::filter(rowSums(!is.na(dplyr::select(., where(is.numeric)))) > 0)
+
+# Remove rows with fewer than 2 non-NA values in each group
+intensity_raw <- intensity_raw %>%
+  dplyr::filter(
+    rowSums(!is.na(dplyr::select(., starts_with("Control_")))) >= 2 &
+    rowSums(!is.na(dplyr::select(., starts_with("NicheProt_")))) >= 2
+  )
+
+
+```
+
+```{r gene mapping using uniprot file, echo = TRUE}
+
+uniprot_ids <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/new_valid2/uniprotkb_AND_model_organism_10090_AND_2024_10_07.xlsx")%>%
+  dplyr::select(Entry, `Gene Names`)%>%
+  dplyr::rename("Proteins"="Entry")
+
+intensity_raw_map <- intensity_raw %>%
+  left_join(.,uniprot_ids, by = "Proteins")%>%
+  mutate(`Gene Names` = gsub(" .*","",`Gene Names`))%>%
+  dplyr::select(Proteins,`Gene Names`,3:8)%>%
+  dplyr::rename("Genes"="Gene Names")
+
+intensity_raw_map$Genes <- make.unique(intensity_raw_map$Genes)
+  
+intensity_raw <- intensity_raw_map
+```
+
+```{r data normalization, echo = TRUE}
+library(dplyr)
+library(tibble)
+library(vsn)
+library(limma)
+
+# Ensure all gene names in the 'Genes' column are unique
+numeric_cols <- intensity_raw %>% 
+  dplyr::select(-c(Proteins)) %>% 
+  mutate(Genes = ifelse(is.na(Genes) | Genes == "", "NA", Genes)) %>% 
+  column_to_rownames(var = "Genes") %>%  
+  mutate(across(starts_with("Control_") | starts_with("NicheProt_"), as.numeric))  
+
+# Check if numeric conversion was successful
+str(numeric_cols)
+
+# Assuming `numeric_data` is your data matrix
+vsn_data <- normalizeVSN(as.matrix(numeric_cols))
+
+# Verify fit using meanSdPlot
+meanSdPlot(vsn_data)
+
+# Convert to a data frame for ggplot2
+normalized_df <- as.data.frame(vsn_data)
+```
+
+```{r data imputation, echo = TRUE}
+# Impute missing values from a normal distribution
+impute_normal <- function(x) {
+  missing <- is.na(x)
+  n_missing <- sum(missing)
+  if (n_missing > 0) {
+    imputed_values <- rnorm(n_missing, mean(x, na.rm = TRUE) - 1.8 * sd(x, na.rm = TRUE), 0.3 * sd(x, na.rm = TRUE))
+    x[missing] <- imputed_values
+  }
+  return(x)
+}
+
+# Impute zero values
+intensity_imputed <- normalized_df %>%
+  mutate(across(starts_with("Control_") | starts_with("NicheProt_") , impute_normal))
+
+```
+
+PCA plots
+```{r pca, echo=TRUE}
+# Perform PCA
+# Remove Protein_ID column for PCA
+
+library(ggrepel)
+pca_data <- intensity_imputed 
+
+# Perform PCA
+# Perform PCA on the log-transformed data
+pca_results <- pca(t(pca_data), method = "svd")
+
+# Extract PCA scores
+pca_scores <- as.data.frame(scores(pca_results))
+pca_scores$Sample <- rownames(pca_scores)
+
+# Prepare pheno_dat
+pheno_dat <- as.data.frame(rownames(pca_scores)) %>%
+  dplyr::rename("Sample" = "rownames(pca_scores)") %>%
+  mutate(Group = case_when(
+    grepl("Control", Sample) ~ "Control",
+    grepl("NicheProt", Sample) ~ "NicheProt",
+    TRUE ~ "Unknown"
+  )) %>%
+  left_join(pca_scores, by = "Sample") 
+
+
+
+pca_sample <- ggplot(pheno_dat, aes(x = PC1, y = PC2, color = Sample)) +
+  geom_point() +
+  labs(title = "PCA by sample", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_sample
+
+pca_group <- ggplot(pheno_dat, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point() +
+  labs(title = "PCA by group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_group
+
+pca_group <- ggplot(pheno_dat, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 2) +
+  # ADD ggforce's ellipses
+  #ggforce::geom_mark_ellipse(aes(color = Group))+
+  geom_text_repel(aes(label = Sample), size = 3) +
+  labs(title = "PCA by group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_group
+
+ggsave("pca_group_plot.png", plot = pca_group, width = 4, height = 3, dpi = 300)
+knitr::include_graphics("pca_group_plot.png")
+
+
+```
+
+```{r perform pearson correlationship plot by groups, echo = TRUE}
+library(dplyr)
+library(ggplot2)
+
+# Identify Control and NicheProt columns
+control_cols <- grep("^Control_", colnames(intensity_imputed), value = TRUE)
+NicheProt_cols <- grep("^NicheProt_", colnames(intensity_imputed), value = TRUE)
+
+# Calculate group-wise average expression per protein
+group_means_log2 <- intensity_imputed %>%
+  mutate(Control_mean = rowMeans(dplyr::select(., all_of(control_cols)), na.rm = TRUE),
+         NicheProt_mean = rowMeans(dplyr::select(., all_of(NicheProt_cols)), na.rm = TRUE)) %>%
+  dplyr::select(Control_mean, NicheProt_mean) %>%
+  mutate(Protein = rownames(intensity_imputed))
+
+# Calculate correlation and n
+cor_value <- cor(group_means_log2$Control_mean, group_means_log2$NicheProt_mean, use = "pairwise.complete.obs")
+n_proteins <- nrow(group_means_log2)
+
+# SCreate plot with annotation
+ggplot(group_means_log2, aes(x = Control_mean, y = NicheProt_mean)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+  coord_equal() +
+  theme_minimal() +
+  labs(title = "Protein Correlation: Control vs. NicheProt (log2-transformed)",
+       x = "log2(Average Expression in Control)",
+       y = "log2(Average Expression in NicheProt)") +
+  annotate("text",
+           x = min(group_means_log2$Control_mean) + 1,
+           y = max(group_means_log2$NicheProt_mean) - 1,
+           label = paste0("n = ", n_proteins, "\nR = ", round(cor_value, 3)),
+           hjust = 0, vjust = 1, size = 5, fontface = "italic")
+
+```
+
+```{r perform coefficients of variation plot NicheProt group, echo = TRUE}
+library(dplyr)
+library(ggplot2)
+library(ggpointdensity)
+library(viridis)
+
+# Get NicheProt sample columns
+NicheProt_cols <- grep("^NicheProt_", colnames(intensity_imputed), value = TRUE)
+
+# Calculate mean and CV for NicheProt samples only
+cv_NicheProt_plot <- intensity_imputed %>%
+  rowwise() %>%
+  mutate(
+    # Mean expression across NicheProt samples
+    mean_log2_NicheProt = mean(c_across(all_of(NicheProt_cols)), na.rm = TRUE),
+    
+    # Coefficient of Variation across NicheProt samples
+    cv_NicheProt = sd(c_across(all_of(NicheProt_cols)), na.rm = TRUE) / 
+                  mean(c_across(all_of(NicheProt_cols)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(mean_log2_NicheProt, cv_NicheProt) %>%
+  mutate(Protein = rownames(intensity_imputed))
+
+# Plot with density-colored dots
+ggplot(cv_NicheProt_plot, aes(x = mean_log2_NicheProt, y = cv_NicheProt)) +
+  geom_pointdensity(adjust = 1) +
+  scale_color_viridis(name = "Point Density", option = "plasma") +
+  geom_smooth(method = "loess", se = FALSE, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "CV vs Mean log2 Intensity in NicheProt Group",
+    x = "Mean log2 Intensity (NicheProt)",
+    y = "Coefficient of Variation"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 11)
+  )
+```
+
+```{r perform coefficients of variation plot control group, echo = TRUE}
+library(dplyr)
+library(ggplot2)
+library(ggpointdensity)
+library(viridis)
+
+
+# Get Control sample columns
+control_cols <- grep("^Control_", colnames(intensity_imputed), value = TRUE)
+
+# Calculate mean and CV for Control samples only
+cv_control_plot <- intensity_imputed %>%
+  rowwise() %>%
+  mutate(
+    # Mean expression across Control samples
+    mean_log2_control = mean(c_across(all_of(control_cols)), na.rm = TRUE),
+    
+    # Coefficient of Variation across Control samples
+    cv_control = sd(c_across(all_of(control_cols)), na.rm = TRUE) / 
+                  mean(c_across(all_of(control_cols)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(mean_log2_control, cv_control) %>%
+  mutate(Protein = rownames(intensity_imputed))
+
+# Plot with density-colored dots
+ggplot(cv_control_plot, aes(x = mean_log2_control, y = cv_control)) +
+  geom_pointdensity(adjust = 1) +
+  scale_color_viridis(name = "Point Density", option = "plasma") +
+  geom_smooth(method = "loess", se = FALSE, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "CV vs Mean log2 Intensity in Control Group",
+    x = "Mean log2 Intensity (Control)",
+    y = "Coefficient of Variation"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 11)
+  )
+
+```
+
+
+
+
