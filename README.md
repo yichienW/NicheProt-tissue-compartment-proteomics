@@ -17,7 +17,7 @@ bioRxiv 2025.10.23.684231; doi: https://doi.org/10.1101/2025.10.23.684231
 **Relevant links:** <remove links that are not relevant>  
 > * Publication DOI: [doi.org/MY-PAPER-DOI](https://doi.org/MY-PAPER-DOI-URL) 
 > * To view an archived record of this repository: [My-ZENODO-DOI](https://zenodo.org/doi/MY-ZENDODO-DOI-URL) 
-> * Mass spectrometry proteomics dataset, visit:
+> * Mass spectrometry proteomics datasets, visit:
 >> * [Cryopreservation artifact assessment](https://www.ebi.ac.uk/pride/archive/projects/PXD075811)
 >> * [NicheProt workflow artifact validation](https://www.ebi.ac.uk/pride/archive/projects/PXD075769)
 >> * [Dendritic cell analysis](https://www.ebi.ac.uk/pride/archive/projects/PXD075718)
