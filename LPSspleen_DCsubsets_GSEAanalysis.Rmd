@@ -33,9 +33,9 @@ library(dplyr)
 
 # Read and preprocess each group
 groups <- list(
-  norm_lpsin = read.csv("/Users/Suzy/Documents/SP_data_processing/LPS/Norm_vs_LPSin.csv"),    
-  norm_lpsout = read.csv("/Users/Suzy/Documents/SP_data_processing/LPS/Norm_vs_LPSout.csv"),  
-  lpsin_lpsout = read.csv("/Users/Suzy/Documents/SP_data_processing/LPS/LPSin_vs_LPSout.csv") 
+  norm_lpsin = read.csv("path-to-your-file/Norm_vs_LPSin.csv"),    
+  norm_lpsout = read.csv("path-to-your-file/Norm_vs_LPSin/Norm_vs_LPSout.csv"),  
+  lpsin_lpsout = read.csv("path-to-your-file/Norm_vs_LPSin/LPSin_vs_LPSout.csv") 
 )
 
 # Initialize list to store results
