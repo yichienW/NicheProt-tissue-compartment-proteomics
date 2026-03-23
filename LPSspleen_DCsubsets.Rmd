@@ -29,7 +29,7 @@ library(tibble)
 
 ```{r read in intensity values from n3 sheet, echo = TRUE}
 
-intensity_raw <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/LPS/CE3_UIC_P24035_12TCZ3_AS1-9_Proteins.xlsx", sheet = 1) %>%
+intensity_raw <- read_xlsx("path-to-your-file/data.xlsx", sheet = 1) %>%
   dplyr::select(4,20:28)
 
 colnames(intensity_raw) <- c("Proteins","Norm_1","Outside_1","Inside_1","Norm_2","Outside_2","Inside_2","Norm_3","Outside_3","Inside_3")
@@ -39,7 +39,7 @@ colnames(intensity_raw) <- c("Proteins","Norm_1","Outside_1","Inside_1","Norm_2"
 
 ```{r gene mapping using uniprot file, echo = TRUE}
 
-uniprot_ids <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/LPS/uniprotkb_AND_model_organism_10090_AND_2024_10_07.xlsx")%>%
+uniprot_ids <- read_xlsx("path-to-your-file/uniprotkb_AND_model_organism_10090_AND_2024_10_07.xlsx")%>%
   dplyr::select(Entry, `Gene Names`)%>%
   dplyr::rename("Proteins"="Entry")
 
