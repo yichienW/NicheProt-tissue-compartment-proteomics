@@ -30,7 +30,7 @@ library(ggrepel)
 
 ```{r read in intensity values from n3 sheet, echo = TRUE}
 
-intensity_raw <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/new_valid2/CE3_2024Oct08_05_P24-162_ES1-ES6_Proteins.xlsx", sheet = 1) %>%
+intensity_raw <- read_xlsx("path-to-your-file/data.xlsx", sheet = 1) %>%
   filter(`Protein FDR Confidence: Combined` != "Checked")%>%
   dplyr::select(4:5, 27:32)
 
@@ -52,7 +52,7 @@ intensity_raw <- intensity_raw %>%
 
 ```{r gene mapping using uniprot file, echo = TRUE}
 
-uniprot_ids <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/new_valid2/uniprotkb_AND_model_organism_10090_AND_2024_10_07.xlsx")%>%
+uniprot_ids <- read_xlsx("path-to-your-file/uniprotkb_AND_model_organism_10090_AND_2024_10_07.xlsx")%>%
   dplyr::select(Entry, `Gene Names`)%>%
   dplyr::rename("Proteins"="Entry")
 
