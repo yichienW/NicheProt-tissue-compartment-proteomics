@@ -1,0 +1,416 @@
+---
+title: "Validation1_tissue cryopreservation proteomics test"
+output: html_document
+date: "2025-04-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Load necessary library
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(pheatmap)
+library(clusterProfiler)
+library(enrichplot)
+library(BioNet)
+library(stringr)
+library(pcaMethods)
+library(DESeq2)
+library(ggpubr)
+library(org.Mm.eg.db)
+library(VIM)
+library(AnnotationDbi)
+library(ggrepel)
+```
+
+```{r read in intensity values from n3 sheet, echo = TRUE}
+
+intensity_raw <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/new_valid1_6samples/P25-047_UIC_Lee_2uL_Proteins.xlsx", sheet = 1) %>%
+  filter(`Protein FDR Confidence: Combined` != "Checked")%>%
+  dplyr::select(4:5, 22:31)
+
+colnames(intensity_raw) <- c("Proteins","Description","Control_1","Cryo_1","Control_2","Cryo_2", "Control_3", "Cryo_3","Control_4", "Cryo_4", "Control_5", "Cryo_5")
+
+# check the column data type
+# convert the selected column from character or factor types to numeric type
+
+sapply(intensity_raw, class)
+
+intensity_raw <- intensity_raw %>%
+  dplyr::mutate(across(c(Control_1,Cryo_1,Control_2,Cryo_2,Control_3,Cryo_3,Control_4,Cryo_4,Control_5, Cryo_5), as.numeric))
+
+sapply(intensity_raw, class)
+
+# Remove rows where all values are NA
+intensity_raw <- intensity_raw %>%
+  dplyr::filter(rowSums(!is.na(dplyr::select(., where(is.numeric)))) > 0)
+
+# Remove rows with fewer than 2 non-NA values in each group
+intensity_raw <- intensity_raw %>%
+  dplyr::filter(
+    rowSums(!is.na(dplyr::select(., starts_with("Control_")))) >= 2 &
+    rowSums(!is.na(dplyr::select(., starts_with("Cryo_")))) >= 2
+  )
+
+
+```
+
+```{r gene mapping using uniprot file, echo = TRUE}
+
+uniprot_ids <- read_xlsx("/Users/Suzy/Documents/SP_data_processing/new_valid1_6samples/uniprotkb_AND_model_organism_10090_AND_2024_10_07.xlsx")%>%
+  dplyr::select(Entry, `Gene Names`)%>%
+  dplyr::rename("Proteins"="Entry")
+
+intensity_raw_map <- intensity_raw %>%
+  left_join(.,uniprot_ids, by = "Proteins")%>%
+  mutate(`Gene Names` = gsub(" .*","",`Gene Names`))%>%
+  dplyr::select(Proteins,`Gene Names`,3:12)%>%
+  dplyr::rename("Genes"="Gene Names")
+
+intensity_raw_map$Genes <- make.unique(intensity_raw_map$Genes)
+  
+intensity_raw <- intensity_raw_map
+```
+
+```{r data normalization, echo = TRUE}
+library(dplyr)
+library(tibble)
+library(vsn)
+library(limma)
+
+# Ensure all gene names in the 'Genes' column are unique
+numeric_cols <- intensity_raw %>% 
+  dplyr::select(-c(Proteins)) %>% 
+  mutate(Genes = ifelse(is.na(Genes) | Genes == "", "NA", Genes)) %>% 
+  column_to_rownames(var = "Genes") %>%  # Set 'Genes' as row names
+  mutate(across(starts_with("Control_") | starts_with("Cryo_"), as.numeric))  # Convert specified columns to numeric
+
+# Check if numeric conversion was successful
+str(numeric_cols)
+
+# Assuming `numeric_data` is your data matrix
+vsn_data <- normalizeVSN(as.matrix(numeric_cols))
+
+# Verify fit using meanSdPlot
+meanSdPlot(vsn_data)
+
+# Convert to a data frame for ggplot2
+normalized_df <- as.data.frame(vsn_data)
+```
+
+```{r data imputation, echo = TRUE}
+# Impute missing values from a normal distribution
+impute_normal <- function(x) {
+  missing <- is.na(x)
+  n_missing <- sum(missing)
+  if (n_missing > 0) {
+    imputed_values <- rnorm(n_missing, mean(x, na.rm = TRUE) - 1.8 * sd(x, na.rm = TRUE), 0.3 * sd(x, na.rm = TRUE))
+    x[missing] <- imputed_values
+  }
+  return(x)
+}
+
+# Impute zero values
+intensity_imputed <- normalized_df %>%
+  mutate(across(starts_with("Control_") | starts_with("Cryo_") , impute_normal))
+
+```
+
+PCA plot
+```{r Batch correction and PCA, echo=TRUE}
+# Perform PCA
+# Remove Protein_ID column for PCA
+
+pca_data <- intensity_imputed 
+
+# Perform PCA
+# Perform PCA on the log-transformed data
+pca_results <- pca(t(pca_data), method = "svd")
+
+# Extract PCA scores
+pca_scores <- as.data.frame(scores(pca_results))
+pca_scores$Sample <- rownames(pca_scores)
+
+#Prepare pheno_dat
+pheno_dat <- as.data.frame(rownames(pca_scores)) %>%
+  dplyr::rename("Sample" = "rownames(pca_scores)") %>%
+  mutate(Group = case_when(
+    grepl("Control", Sample) ~ "Control",
+    grepl("Cryo", Sample) ~ "Cryo",
+    TRUE ~ "Unknown"
+  )) %>%
+  left_join(pca_scores, by = "Sample") %>%
+  mutate(batch =ifelse(Sample %in% c("Control_1", "Cryo_1", "Control_2", "Cryo_2"),"batch_1",""))%>%
+  mutate(batch =ifelse(Sample %in% c("Control_3","Cryo_3","Control_4", "Cryo_4", "Control_5", "Cryo_5"),"batch_2",batch))
+
+```
+
+```{r Continue batch correction and PCA, echo = TRUE}
+library(sva)
+library(ggrepel)
+
+# Convert normalized_df to a numeric matrix 
+normalized_matrix <- as.matrix(intensity_imputed)
+
+# Ensure that batch is a factor in pheno_dat
+pheno_dat$batch <- as.factor(pheno_dat$batch)
+pheno_dat$Group <- as.factor(pheno_dat$Group)
+
+# Apply ComBat to correct for batch effects
+# Create a design matrix
+mod <- model.matrix(~ Group, data = pheno_dat)
+
+# Apply ComBat for batch correction
+batch_corrected <- ComBat(dat = normalized_matrix,
+                           batch = pheno_dat$batch, 
+                           mod = mod,              
+                           par.prior = TRUE, 
+                           prior.plots = FALSE)    
+
+batch_corrected <- as.data.frame(batch_corrected)
+
+# Perform PCA
+pca_result <- pca(t(batch_corrected), method = "svd")
+
+# Extract PCA scores
+pca_batch_correct <- as.data.frame(scores(pca_result))
+pca_batch_correct$Sample <- rownames(pca_batch_correct)
+
+
+pheno_dat <- pheno_dat %>%
+  left_join(pca_batch_correct, by = "Sample") 
+
+
+# Plot PCA results
+pca_group <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = Group)) +
+  geom_point(size = 3) +
+  # ADD ggforce's ellipses
+  #ggforce::geom_mark_ellipse(aes(color = batch))+
+  labs(title = "PCA by group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_group
+
+
+pca_sample <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = Sample, shape = Group)) +
+  geom_point(size = 3) +
+  labs(title = "PCA by sample and treatment", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_sample
+
+pca_sample <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = Group, shape = batch)) +
+  geom_point(size = 3) +
+  labs(title = "PCA by batch and group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_sample
+
+pca_sample <- ggplot(pheno_dat, aes(x = PC1.y, y = PC2.y, color = Group)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Sample), size = 4, max.overlaps = Inf) +
+  labs(title = "PCA by batch and group", x = "PC1", y = "PC2") +
+  theme_bw()
+
+pca_sample
+```
+
+
+```{r perform pearson correlation plot, echo = TRUE}
+library(pheatmap)
+library(dplyr)
+
+# Transpose intensity matrix so rows = samples, columns = proteins
+expr_t <- t(intensity_imputed)
+
+# Make sure it's a numeric matrix
+expr_matrix <- as.matrix(expr_t)
+
+# Compute sample-to-sample Pearson correlation
+cor_matrix <- cor(t(expr_matrix), method = "pearson", use = "pairwise.complete.obs")
+
+# Make an annotation data frame for sample groups
+sample_annotation <- pheno_dat %>%
+  column_to_rownames("Sample") %>%   # Match rownames with colnames of cor_matrix
+  dplyr::select(Group)
+
+# Plot with group annotations
+pheatmap(cor_matrix,
+         annotation_col = sample_annotation,
+         annotation_row = sample_annotation,
+         clustering_distance_rows = "correlation",
+         clustering_distance_cols = "correlation",
+         main = "Sample-to-Sample Pearson Correlation",
+         fontsize = 10,
+         display_numbers = FALSE,
+         number_format = "%.2f")
+```
+
+```{r perform pearson correlation plot with batch correction, echo = TRUE}
+library(pheatmap)
+library(dplyr)
+
+# Transpose intensity matrix so rows = samples, columns = proteins
+expr_t <- t(batch_corrected)
+
+# Make sure it's a numeric matrix
+expr_matrix <- as.matrix(expr_t)
+
+# Compute sample-to-sample Pearson correlation
+cor_matrix <- cor(t(expr_matrix), method = "pearson", use = "pairwise.complete.obs")
+
+# Make an annotation data frame for sample groups
+sample_annotation <- pheno_dat %>%
+  column_to_rownames("Sample") %>%   # Match rownames with colnames of cor_matrix
+  dplyr::select(Group)
+
+#save the image 
+png("/Users/Suzy/Documents/SP_data_processing/new_valid1_6samples/correlation_2.png",
+    width = 6,
+    height = 4,
+    units = "in",
+    res = 600)
+
+# Plot with group annotations
+pheatmap(cor_matrix,
+         annotation_col = sample_annotation,
+         annotation_row = sample_annotation,
+         color= colorRampPalette(c("navy", "white", "firebrick3"))(20),
+         clustering_distance_rows = "correlation",
+         clustering_distance_cols = "correlation",
+         main = "Sample-to-Sample Pearson Correlation",
+         fontsize = 10,
+         display_numbers = FALSE,
+         number_format = "%.2f")
+
+dev.off()
+```
+
+```{r perform pearson correlationship plot by groups, echo = TRUE}
+library(dplyr)
+library(ggplot2)
+
+# Identify Control and Cryopreservation columns
+control_cols <- grep("^Control_", colnames(batch_corrected), value = TRUE)
+cryo_cols <- grep("^Cryo_", colnames(batch_corrected), value = TRUE)
+
+# Calculate group-wise average expression per protein
+group_means_log2 <- batch_corrected %>%
+  mutate(Control_mean = rowMeans(dplyr::select(., all_of(control_cols)), na.rm = TRUE),
+         Cryo_mean = rowMeans(dplyr::select(., all_of(cryo_cols)), na.rm = TRUE)) %>%
+  dplyr::select(Control_mean, Cryo_mean) %>%
+  mutate(Protein = rownames(batch_corrected))
+
+# Calculate correlation and n
+cor_value <- cor(group_means_log2$Control_mean, group_means_log2$Cryo_mean, use = "pairwise.complete.obs")
+n_proteins <- nrow(group_means_log2)
+
+# Create plot with annotation
+ggplot(group_means_log2, aes(x = Control_mean, y = Cryo_mean)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+  coord_equal() +
+  theme_minimal() +
+  labs(title = "Protein Correlation: Control vs. Cryo (log2-transformed)",
+       x = "log2(Average Expression in Control)",
+       y = "log2(Average Expression in Cryo)") +
+  annotate("text",
+           x = min(group_means_log2$Control_mean) + 1,
+           y = max(group_means_log2$Cryo_mean) - 1,
+           label = paste0("n = ", n_proteins, "\nR = ", round(cor_value, 3)),
+           hjust = 0, vjust = 1, size = 5, fontface = "italic")
+
+```
+
+
+```{r perform coefficients of variation plot Cryopreservation group, echo = TRUE}
+library(dplyr)
+library(ggplot2)
+library(ggpointdensity)
+library(viridis)
+
+# Get Cryopreservation sample columns
+log2_data <- intensity_raw
+log2_data[ , -(1:2)] <- log2(log2_data[ ,-(1:2)])
+cryo_cols <- grep("^Cryo_", colnames(log2_data), value = TRUE)
+
+# Calculate mean and CV for Cryo samples only
+cv_cryo_plot <- log2_data %>%
+  rowwise() %>%
+  mutate(
+    # Mean expression across Cryo samples
+    mean_log2_cryo = mean(c_across(all_of(cryo_cols)), na.rm = TRUE),
+    
+    # Coefficient of variation across Cryo samples
+    cv_cryo = sd(c_across(all_of(cryo_cols)), na.rm = TRUE) / 
+                  mean(c_across(all_of(cryo_cols)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(mean_log2_cryo, cv_cryo) %>%
+  mutate(Protein = rownames(log2_data))
+
+# Plot with density-colored dots
+ggplot(cv_cryo_plot, aes(x = mean_log2_cryo, y = cv_cryo)) +
+  geom_pointdensity(adjust = 1) +
+  scale_color_viridis(name = "Point Density", option = "plasma") +
+  geom_smooth(method = "loess", se = FALSE, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "CV vs Mean log2 Intensity in Cryo Group",
+    x = "Mean log2 Intensity (Cryo)",
+    y = "Coefficient of Variation"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 11)
+  )
+```
+
+
+```{r perform coefficients of variation plot control group, echo = TRUE}
+library(dplyr)
+library(ggplot2)
+library(ggpointdensity)
+library(viridis)
+
+
+# Get control sample columns
+control_cols <- grep("^Control_", colnames(intensity_imputed), value = TRUE)
+
+# Calculate mean and CV for control samples only
+cv_control_plot <- intensity_imputed %>%
+  rowwise() %>%
+  mutate(
+    # Mean expression across control samples
+    mean_log2_control = mean(c_across(all_of(control_cols)), na.rm = TRUE),
+    
+    # Coefficient of Variation across control samples
+    cv_control = sd(c_across(all_of(control_cols)), na.rm = TRUE) / 
+                  mean(c_across(all_of(control_cols)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(mean_log2_control, cv_control) %>%
+  mutate(Protein = rownames(intensity_imputed))
+
+# Plot with density-colored dots
+ggplot(cv_control_plot, aes(x = mean_log2_control, y = cv_control)) +
+  geom_pointdensity(adjust = 1) +
+  scale_color_viridis(name = "Point Density", option = "plasma") +
+  geom_smooth(method = "loess", se = FALSE, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "CV vs Mean log2 Intensity in Control Group",
+    x = "Mean log2 Intensity (Control)",
+    y = "Coefficient of Variation"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 11)
+  )
+
+```
+
